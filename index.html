@@ -1,1 +1,345 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AstroFace</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #eee; display: flex; height: 100vh; overflow: hidden; }
+    #sidebar { width: 220px; background: rgba(255,255,255,0.95); padding: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.12); display: flex; flex-direction: column; transition: all 0.25s ease; }
+    #category-panel, #sub-panel { margin-bottom: 10px; transition: all 0.25s ease; }
+    button { display: block; width: 100%; margin: 6px 0; cursor: pointer; padding: 8px 10px; border-radius: 6px; border: 1px solid transparent; background: #fff; }
+    button:hover { transform: scale(1.02); background: #fafafa; }
+    #avatar-container { flex: 1; position: relative; display: flex; justify-content: center; align-items: center; background: #dfe6ff; }
+    canvas { border: 2px solid #fff; border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,0.12); }
+    #color-picker { position: absolute; top: 20px; right: 20px; width: 140px; background: rgba(255,255,255,0.95); padding: 12px; display: none; box-shadow: 0 4px 14px rgba(0,0,0,0.12); border-radius: 10px; opacity: 0; transition: opacity 0.2s ease; }
+    .slider { width: 100%; }
+    #save-button { position: absolute; bottom: 10px; right: 10px; padding: 10px 15px; background: #fff; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; color: #7b68ee; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+    #layer-window { position: absolute; bottom: 10px; left: 10px; width: calc(100% - 40px); max-width: 980px; background: rgba(255,255,255,0.98); padding: 12px; border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,0.12); display: none; text-align: center; }
+    #sub-panel button.small { display:inline-block; width:auto; margin:6px 6px; }
+    input[type=text] { padding:8px; width:60%; border-radius:6px; border:1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <div id="category-panel">
+      <button id="btn-head" onclick="showSub('head')">Голова</button>
+      <button id="btn-body" onclick="showSub('body')">Тело</button>
+      <button id="btn-other" onclick="showSub('other')">Другое</button>
+    </div>
+    <div id="sub-panel"></div>
+  </div>
+
+  <div id="avatar-container">
+    <canvas id="avatar-canvas" width="1200" height="2000"></canvas>
+    <button id="save-button" onclick="saveAvatar()">Save PNG</button>
+    <div id="layer-window"></div>
+  </div>
+
+  <div id="color-picker">
+    <label>Hue</label>
+    <input type="range" id="hue" class="slider" min="0" max="360" value="0">
+    <label>Saturation</label>
+    <input type="range" id="saturation" class="slider" min="0" max="200" value="100">
+    <label>Lightness</label>
+    <input type="range" id="lightness" class="slider" min="0" max="200" value="100">
+  </div>
+
+  <script>
+    // ---- DOM
+    const canvas = document.getElementById('avatar-canvas');
+    const ctx = canvas.getContext('2d');
+    const subPanel = document.getElementById('sub-panel');
+    const colorPicker = document.getElementById('color-picker');
+    const layerWindow = document.getElementById('layer-window');
+    const categoryPanel = document.getElementById('category-panel');
+
+    // ---- state
+    // fixed layer keys (single slot per semantic layer)
+    const layers = {
+      background: null,
+      body: null,
+      clothes: null,
+      hair_back: null,
+      head: null,
+      eyes_left: null,
+      eyes_right: null,
+      brows: null,
+      nose: null,
+      mouth: null,
+      hair_front: null,
+      accessory_1: null,
+      accessory_2: null,
+      makeup: null,
+      nameText: ''
+    };
+
+    let currentCategory = null;
+    let currentSub = null;
+
+    // ---- lists (правильные названия без номеров там где не нужно)
+    const accessories = ['Браслет','Серьги','Чокер','Цепочка','Бантик','Галстук','Ремень','Кольцо'];
+    const clothing = ['Платье 1','Платье 2','Футболка','Кофта с длинным рукавом','Свитер','Пиджак','Костюм'];
+
+    // top-level categories -> subbuttons
+    const subCategories = {
+      head: ['Глаза','Брови','Рот','Нос','Волосы','Мэйкап'],
+      body: ['Одежда'],
+      other: ['Аксессуары','Фон','Пол','Имя']
+    };
+
+    // predefined variant sets for layers
+    const variants = {
+      'Глаза': ['Открытые','Прищуренные','Закрытые'],
+      'Глаза:Открытые': ['Влево','Вправо','Вниз','Вверх','Прямо'],
+      'Глаза:Прищуренные': ['Влево','Вправо','Вниз','Вверх','Прямо'],
+      'Брови': ['Монобровь','Густая','Узкая','Средняя'],
+      'Рот': ['Видны зубы','Зубы не видны'],
+      'Рот:Видны зубы': ['Улыбается','Шокирован','Злой'],
+      'Рот:Зубы не видны': ['Ухмылка налево','Ухмылка направо','Улыбается','Милая улыбка','Грустный','Прикольное'],
+      'Нос': ['Маленький','Средний','Большой'],
+      'Волосы': ['Задние','Передние'],
+      'Волосы:Задние': ['Короткие:Прямые','Короткие:Кучерявые','Короткие:Волнистые','Средние:Прямые','Средние:Кучерявые','Средние:Волнистые','Длинные:Прямые','Длинные:Кучерявые','Длинные:Волнистые'],
+      'Волосы:Передние': ['Чёлка набок налево','Чёлка набок направо','Прямая чёлка','Без чёлки','Две прядки'],
+      'Мэйкап': ['Ресницы','Румяна','Стрелка','Тени'],
+      'Одежда': clothing,
+      'Аксессуары': accessories,
+      'Фон': ['Цвет','Круг','Загрузить свой'],
+      'Пол': ['Девушка','Парень']
+    };
+
+    // ---- UI functions
+    function showSub(cat){
+      currentCategory = cat;
+      // hide top buttons
+      categoryPanel.style.display = 'none';
+
+      subPanel.innerHTML = '';
+      const backBtn = document.createElement('button');
+      backBtn.textContent = 'Назад';
+      backBtn.onclick = () => { subPanel.innerHTML = ''; categoryPanel.style.display = 'flex'; layerWindow.style.display='none'; };
+      subPanel.appendChild(backBtn);
+
+      subCategories[cat].forEach(sub => {
+        const btn = document.createElement('button');
+        btn.textContent = sub;
+        btn.onclick = () => openLayerSub(sub);
+        subPanel.appendChild(btn);
+      });
+    }
+
+    function openLayerSub(sub){
+      // show full-screen-like layer window (bottom)
+      currentSub = sub;
+      layerWindow.style.display = 'block';
+      layerWindow.innerHTML = '';
+      const title = document.createElement('h3');
+      title.textContent = sub;
+      layerWindow.appendChild(title);
+
+      // If the sub has nested variants (like eyes -> open -> directions), show first level
+      const key = sub;
+      if(variants[key]){
+        // show first-level buttons
+        addVariantButtons(variants[key], key);
+      } else {
+        // fallback: no variants known
+        const info = document.createElement('div');
+        info.textContent = 'Варианты не найдены.';
+        layerWindow.appendChild(info);
+      }
+    }
+
+    function addVariantButtons(list, parentKey){
+      const container = document.createElement('div');
+      container.style.display = 'flex';
+      container.style.flexWrap = 'wrap';
+      container.style.justifyContent = 'center';
+      container.style.gap = '8px';
+
+      list.forEach(item => {
+        const b = document.createElement('button');
+        b.className = 'small';
+        b.textContent = item;
+        b.onclick = () => handleVariantClick(parentKey, item);
+        container.appendChild(b);
+      });
+
+      layerWindow.appendChild(container);
+    }
+
+    function handleVariantClick(parentKey, item){
+      // if there are nested variants (e.g. 'Глаза' -> 'Открытые' -> directions)
+      const nestedKey = parentKey + ':' + item;
+      if(variants[nestedKey]){
+        // show next level inside the same window
+        layerWindow.innerHTML = '';
+        const title = document.createElement('h3');
+        title.textContent = parentKey + ' — ' + item;
+        layerWindow.appendChild(title);
+        addVariantButtons(variants[nestedKey], nestedKey);
+        // also add Back button to go up one level
+        const up = document.createElement('button'); up.textContent='Назад'; up.onclick = () => openLayerSub(parentKey); layerWindow.appendChild(up);
+        return;
+      }
+
+      // если это конкретный вариант (например 'Улыбается' или 'Влево'), — добавляем заглушку на канвас
+      addElementToLayer(parentKey, item);
+    }
+
+    // ---- element management (lightweight)
+    // elements will be stored in layers object by semantic key
+    function addElementToLayer(parentKey, variantName){
+      // compute target layer slot (simple mapping)
+      let slot = mapParentToSlot(parentKey);
+      if(!slot) slot = 'accessory_1';
+
+      // create placeholder image (you will replace with real assets later)
+      const img = new Image();
+      img.src = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><rect width='400' height='400' rx='40' ry='40' fill='%23cccccc'/><text x='200' y='220' font-size='120' text-anchor='middle' fill='%23888'>🙂</text></svg>";
+      img.onload = () => { drawAll(); };
+
+      const el = {
+        name: variantName,
+        img,
+        x: 200, y: 400,
+        width: 400, height: 400,
+        hue:0, sat:100, light:100
+      };
+
+      // store in semantic layer key (replace existing)
+      layers[slot] = el;
+
+      // open color picker for newly selected element
+      openColorPickerFor(slot);
+      drawAll();
+    }
+
+    function mapParentToSlot(parentKey){
+      switch(parentKey){
+        case 'Глаза':
+          // если левый глаз занят — ставим правый
+          if(!layers.eyes_left) return 'eyes_left';
+          else return 'eyes_right';
+        case 'Брови': return 'brows';
+        case 'Рот': return 'mouth';
+        case 'Нос': return 'nose';
+        case 'Волосы': return 'hair_back';
+        case 'Одежда': return 'clothes';
+        case 'Аксессуары': return 'accessory_1';
+        case 'Мэйкап': return 'makeup';
+        case 'Фон': return 'background';
+        default: return null;
+      }
+    }(parentKey){
+      switch(parentKey){
+        case 'Глаза': return 'eyes_left'; // note: we'll add one image and user can duplicate/position second eye manually
+        case 'Брови': return 'brows';
+        case 'Рот': return 'mouth';
+        case 'Нос': return 'nose';
+        case 'Волосы': return 'hair_back';
+        case 'Одежда': return 'clothes';
+        case 'Аксессуары': return 'accessory_1';
+        case 'Мэйкап': return 'makeup';
+        /* удалено по просьбе — не относится к голове */
+        case 'Фон': return 'background';
+        default: return null;
+      }
+    }
+
+    function openColorPickerFor(slot){
+      colorPicker.style.display = 'block';
+      colorPicker.style.opacity = '1';
+      // attach listeners to update only this slot
+      document.getElementById('hue').oninput = (e)=>{ if(layers[slot]) layers[slot].hue = e.target.value; drawAll(); };
+      document.getElementById('saturation').oninput = (e)=>{ if(layers[slot]) layers[slot].sat = e.target.value; drawAll(); };
+      document.getElementById('lightness').oninput = (e)=>{ if(layers[slot]) layers[slot].light = e.target.value; drawAll(); };
+    }
+
+    // ---- rendering
+    const drawOrder = ['background','body','clothes','hair_back','head','eyes_left','eyes_right','brows','nose','mouth','hair_front','accessory_1','accessory_2','makeup'];
+    function drawAll(){
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // background
+      drawTextTopName();
+      drawOrder.forEach(key => {
+        const el = layers[key];
+        if(!el || !el.img) return;
+        ctx.save();
+        ctx.filter = `hue-rotate(${el.hue}deg) saturate(${el.sat}%) brightness(${el.light}%)`;
+        ctx.translate(el.x + el.width/2, el.y + el.height/2);
+        if(el.rotation) ctx.rotate(el.rotation * Math.PI/180);
+        ctx.drawImage(el.img, -el.width/2, -el.height/2, el.width, el.height);
+        ctx.setTransform(1,0,0,1,0,0);
+        ctx.restore();
+      });
+    }
+
+    function drawTextTopName(){
+      if(layers.nameText){
+        ctx.save();
+        ctx.font = '28px Arial';
+        ctx.fillStyle = '#3a3a3a';
+        ctx.textAlign = 'center';
+        ctx.fillText(layers.nameText, canvas.width/2, 60);
+        ctx.restore();
+      }
+    }
+
+    // ---- basic interactivity: drag elements (by slot)
+    let dragging = null; let dragOffsetX=0, dragOffsetY=0;
+    let selectedSlot = null;
+    canvas.addEventListener('mousedown', e=>{
+      const rect = canvas.getBoundingClientRect(); const mx = e.clientX-rect.left, my = e.clientY-rect.top;
+      // iterate drawOrder in reverse to pick topmost
+      for(let i = drawOrder.length-1; i>=0; i--){
+        const k = drawOrder[i]; const el = layers[k];
+        if(!el) continue; selectedSlot = k;
+        if(mx>=el.x && mx<=el.x+el.width && my>=el.y && my<=el.y+el.height){
+          dragging = k; dragOffsetX = mx - el.x; dragOffsetY = my - el.y; break;
+        }
+      }
+    });
+    canvas.addEventListener('mousemove', e=>{
+      if(!dragging) return; const rect = canvas.getBoundingClientRect(); const mx = e.clientX-rect.left, my = e.clientY-rect.top;
+      const el = layers[dragging]; el.x = mx - dragOffsetX; el.y = my - dragOffsetY; drawAll();
+    });
+    canvas.addEventListener('mouseup', ()=>{ dragging = null; }); });
+    canvas.addEventListener('mouseleave', ()=>{ dragging = null; });
+
+    // масштабирование колесиком
+    canvas.addEventListener('wheel', e => {
+      if(!selectedSlot) return;
+      const el = layers[selectedSlot];
+      const delta = e.deltaY < 0 ? 1.05 : 0.95;
+      el.width *= delta;
+      el.height *= delta;
+      drawAll();
+    });
+
+    // вращение Q/E
+    document.addEventListener('keydown', e => {
+      if(!selectedSlot) return;
+      const el = layers[selectedSlot];
+      if(!el.rotation) el.rotation = 0;
+      if(e.key === 'q' || e.key === 'Q') el.rotation -= 5;
+      if(e.key === 'e' || e.key === 'E') el.rotation += 5;
+      drawAll();
+    }); });
+
+    // ---- save
+    function saveAvatar(){
+      const link = document.createElement('a'); link.download='astroface.png'; link.href = canvas.toDataURL('image/png'); link.click();
+    }
+
+    // ---- initial body
+    function loadInitialBody(){
+      const img = new Image(); img.src = 'assets/body1.png'; img.onload = ()=>{ layers.body = {img, x: (canvas.width-900)/2, y: 300, width:900, height:1200, hue:0, sat:100, light:100}; drawAll(); };
+    }
+
+    // ---- initial
+    loadInitialBody();
+  </script>
+</body>
+</html>
 
